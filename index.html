@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Genetic Algorithm TSP Visualizer</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { background:#030712; color:#f1f5f9; }
+  #tsp-canvas { cursor:crosshair; border:1px solid #374151; display:block; }
+  #chart-canvas { display:block; border:1px solid #1f2937; }
+</style>
+</head>
+<body class="min-h-screen flex flex-col items-center p-4">
+
+<h1 class="text-2xl font-bold text-orange-400 mt-3 mb-1">GA Traveling Salesman Visualizer</h1>
+<p class="text-gray-400 text-xs mb-3">Click canvas to add cities (up to 20) · GA finds shortest route</p>
+
+<div class="flex gap-4 flex-wrap justify-center items-start">
+  <!-- Main canvas -->
+  <div>
+    <canvas id="tsp-canvas" width="480" height="380" aria-label="City map - click to add cities"></canvas>
+    <div class="flex gap-2 mt-2 flex-wrap justify-center">
+      <button id="btn-run" onclick="toggleRun()" class="px-4 py-1.5 bg-orange-600 hover:bg-orange-500 rounded-lg font-semibold text-sm transition" disabled>▶ Run GA</button>
+      <button onclick="resetAll()" class="px-4 py-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg font-semibold text-sm transition">Reset</button>
+      <button onclick="addRandomCities()" class="px-4 py-1.5 bg-blue-700 hover:bg-blue-600 rounded-lg font-semibold text-sm transition">Random Cities</button>
+    </div>
+  </div>
+  <!-- Right panel -->
+  <div class="flex flex-col gap-3 min-w-48">
+    <div class="bg-gray-900 rounded-xl p-3 text-sm">
+      <div class="text-gray-400 mb-1">Generation</div>
+      <div id="gen-disp" class="text-orange-400 font-bold text-xl">0</div>
+      <div class="text-gray-400 mt-2 mb-1">Best Distance</div>
+      <div id="dist-disp" class="text-yellow-400 font-bold text-xl">—</div>
+      <div class="text-gray-400 mt-2 mb-1">Cities</div>
+      <div id="cities-disp" class="text-green-400 font-bold text-xl">0</div>
+    </div>
+    <div class="bg-gray-900 rounded-xl p-3 text-xs text-gray-400">
+      <p class="font-semibold text-gray-300 mb-1">GA Parameters</p>
+      <p>Population: 100</p>
+      <p>Tournament: 5</p>
+      <p>Order crossover (OX)</p>
+      <p>Mutation: swap</p>
+    </div>
+    <!-- Distance chart -->
+    <div class="bg-gray-900 rounded-xl p-2">
+      <p class="text-xs text-gray-400 mb-1 font-semibold">Distance History</p>
+      <canvas id="chart-canvas" width="200" height="120"></canvas>
+    </div>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('tsp-canvas');
+const ctx = canvas.getContext('2d');
+const chartCanvas = document.getElementById('chart-canvas');
+const cctx = chartCanvas.getContext('2d');
+
+let cities = [];
+let bestRoute = [];
+let bestDist = Infinity;
+let generation = 0;
+let running = false;
+let rafId = null;
+let distHistory = [];
+let population = [];
+
+const POP_SIZE = 100;
+const TOURNAMENT_K = 5;
+const MUTATION_RATE = 0.02;
+
+// --- City management ---
+canvas.addEventListener('click', e => {
+  if (cities.length >= 20) return;
+  const rect = canvas.getBoundingClientRect();
+  const sx = canvas.width / rect.width;
+  const sy = canvas.height / rect.height;
+  cities.push({ x: (e.clientX-rect.left)*sx, y: (e.clientY-rect.top)*sy });
+  updateCityCount();
+  if (cities.length >= 2) {
+    document.getElementById('btn-run').disabled = false;
+    initGA();
+    drawAll();
+  } else drawAll();
+});
+
+function updateCityCount() {
+  document.getElementById('cities-disp').textContent = cities.length;
+}
+
+function addRandomCities() {
+  resetAll();
+  const n = 12 + Math.floor(Math.random()*8); // 12-19
+  for (let i=0;i<n;i++) {
+    cities.push({ x: 30+Math.random()*(canvas.width-60), y: 30+Math.random()*(canvas.height-60) });
+  }
+  updateCityCount();
+  document.getElementById('btn-run').disabled = false;
+  initGA();
+  drawAll();
+}
+
+function resetAll() {
+  stopGA();
+  cities=[]; bestRoute=[]; bestDist=Infinity; generation=0; distHistory=[]; population=[];
+  document.getElementById('btn-run').disabled=true;
+  document.getElementById('btn-run').textContent='▶ Run GA';
+  document.getElementById('gen-disp').textContent='0';
+  document.getElementById('dist-disp').textContent='—';
+  updateCityCount();
+  drawAll();
+  drawChart();
+}
+
+// --- GA Logic ---
+function dist(a, b) {
+  const dx=a.x-b.x, dy=a.y-b.y;
+  return Math.sqrt(dx*dx+dy*dy);
+}
+
+function routeLength(route) {
+  let d=0;
+  for (let i=0;i<route.length;i++) d+=dist(cities[route[i]], cities[route[(i+1)%route.length]]);
+  return d;
+}
+
+function initGA() {
+  const n = cities.length;
+  population = [];
+  for (let i=0;i<POP_SIZE;i++) {
+    const route = [...Array(n).keys()].sort(()=>Math.random()-0.5);
+    population.push(route);
+  }
+  generation=0; bestDist=Infinity; distHistory=[];
+  evaluatePop();
+}
+
+function evaluatePop() {
+  let improved=false;
+  for (const r of population) {
+    const d=routeLength(r);
+    if (d<bestDist) { bestDist=d; bestRoute=[...r]; improved=true; }
+  }
+  return improved;
+}
+
+function tournament() {
+  let best=null, bestD=Infinity;
+  for (let i=0;i<TOURNAMENT_K;i++) {
+    const r=population[Math.floor(Math.random()*POP_SIZE)];
+    const d=routeLength(r);
+    if (d<bestD) { bestD=d; best=r; }
+  }
+  return best;
+}
+
+function oxCrossover(p1, p2) {
+  const n=p1.length;
+  const a=Math.floor(Math.random()*n), b=a+Math.floor(Math.random()*(n-a));
+  const child=new Array(n).fill(-1);
+  for (let i=a;i<=b;i++) child[i]=p1[i];
+  const remaining=p2.filter(x=>!child.includes(x));
+  let ri=0;
+  for (let i=0;i<n;i++) if (child[i]===-1) child[i]=remaining[ri++];
+  return child;
+}
+
+function mutate(route) {
+  if (Math.random()<MUTATION_RATE) {
+    const i=Math.floor(Math.random()*route.length);
+    const j=Math.floor(Math.random()*route.length);
+    [route[i],route[j]]=[route[j],route[i]];
+  }
+  return route;
+}
+
+function gaStep() {
+  const newPop=[];
+  // Keep best (elitism)
+  newPop.push([...bestRoute]);
+  while (newPop.length<POP_SIZE) {
+    const p1=tournament(), p2=tournament();
+    let child=oxCrossover(p1,p2);
+    child=mutate(child);
+    newPop.push(child);
+  }
+  population=newPop;
+  generation++;
+  evaluatePop();
+  distHistory.push(bestDist);
+  document.getElementById('gen-disp').textContent=generation;
+  document.getElementById('dist-disp').textContent=Math.round(bestDist);
+  drawAll();
+  drawChart();
+}
+
+function toggleRun() {
+  running=!running;
+  const btn=document.getElementById('btn-run');
+  if (running) {
+    btn.textContent='⏸ Stop';
+    btn.className='px-4 py-1.5 bg-yellow-600 hover:bg-yellow-500 rounded-lg font-semibold text-sm transition';
+    runLoop();
+  } else {
+    stopGA();
+  }
+}
+
+function stopGA() {
+  running=false;
+  cancelAnimationFrame(rafId);
+  const btn=document.getElementById('btn-run');
+  btn.textContent='▶ Run GA';
+  btn.className='px-4 py-1.5 bg-orange-600 hover:bg-orange-500 rounded-lg font-semibold text-sm transition';
+}
+
+let stepsPerFrame=5;
+function runLoop() {
+  if (!running) return;
+  for (let i=0;i<stepsPerFrame;i++) gaStep();
+  rafId=requestAnimationFrame(runLoop);
+}
+
+// --- Drawing ---
+function drawAll() {
+  ctx.fillStyle='#030712';
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+
+  if (bestRoute.length > 1) {
+    ctx.strokeStyle='rgba(251,146,60,0.8)';
+    ctx.lineWidth=2;
+    ctx.beginPath();
+    const first=cities[bestRoute[0]];
+    ctx.moveTo(first.x,first.y);
+    for (let i=1;i<bestRoute.length;i++) {
+      const c=cities[bestRoute[i]];
+      ctx.lineTo(c.x,c.y);
+    }
+    ctx.lineTo(first.x,first.y);
+    ctx.stroke();
+  }
+
+  cities.forEach((c,i) => {
+    ctx.fillStyle='#fbbf24';
+    ctx.beginPath();
+    ctx.arc(c.x,c.y,6,0,Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle='#030712';
+    ctx.font='bold 9px monospace';
+    ctx.textAlign='center';
+    ctx.textBaseline='middle';
+    ctx.fillText(String(i+1),c.x,c.y);
+  });
+
+  if (cities.length<20) {
+    ctx.fillStyle='rgba(156,163,175,0.4)';
+    ctx.font='13px sans-serif';
+    ctx.textAlign='left';
+    ctx.textBaseline='top';
+    ctx.fillText(`Click to add city (${cities.length}/20)`,8,8);
+  }
+}
+
+function drawChart() {
+  cctx.fillStyle='#111827';
+  cctx.fillRect(0,0,200,120);
+  if (distHistory.length < 2) return;
+  const minD=Math.min(...distHistory), maxD=distHistory[0];
+  const range=maxD-minD||1;
+  const W=200, H=120, pad=8;
+  cctx.strokeStyle='rgba(251,146,60,0.8)';
+  cctx.lineWidth=1.5;
+  cctx.beginPath();
+  distHistory.forEach((d,i)=>{
+    const x=pad+(i/(distHistory.length-1))*(W-pad*2);
+    const y=pad+(1-(d-minD)/range)*(H-pad*2);
+    i===0?cctx.moveTo(x,y):cctx.lineTo(x,y);
+  });
+  cctx.stroke();
+  // Axes labels
+  cctx.fillStyle='rgba(156,163,175,0.7)';
+  cctx.font='9px monospace';
+  cctx.textAlign='right';
+  cctx.fillText(Math.round(maxD),W-2,pad+4);
+  cctx.fillText(Math.round(minD),W-2,H-pad);
+  cctx.textAlign='left';
+  cctx.fillText('gen '+distHistory.length,2,H-2);
+}
+
+// Init
+drawAll();
+drawChart();
+</script>
+</body>
+</html>
